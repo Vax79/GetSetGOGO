@@ -35,6 +35,11 @@ function App() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [draggedId, setDraggedId] = useState(null)
+  const [tiktokLink, setTiktokLink] = useState('')
+  const [metadataPreview, setMetadataPreview] = useState(null)
+  const [metadataLoading, setMetadataLoading] = useState(false)
+  const [transcriptPreview, setTranscriptPreview] = useState(null)
+  const [transcriptLoading, setTranscriptLoading] = useState(false)
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId) || null
   const itineraryDays = useMemo(() => groupByDate(itinerary), [itinerary])
@@ -134,6 +139,50 @@ function App() {
     }
   }
 
+  // Request a non-persisted TikTok caption and author preview for the active trip.
+  const retrieveTikTokMetadata = async (event) => {
+    event.preventDefault()
+    if (!selectedTrip || !tiktokLink.trim()) return
+    setMetadataLoading(true)
+    setMetadataPreview(null)
+    try {
+      const response = await fetch(`/api/trips/${selectedTrip.id}/video-metadata`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_url: tiktokLink.trim() }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Could not check this TikTok link.')
+      setMetadataPreview(data)
+      setTranscriptPreview(null)
+    } catch (requestError) {
+      setMetadataPreview({ detected: false, message: requestError.message })
+    } finally {
+      setMetadataLoading(false)
+    }
+  }
+
+  // Request the complete ScrapeBadger speech-to-text transcript for the attached TikTok link.
+  const retrieveTikTokTranscript = async () => {
+    if (!selectedTrip || !tiktokLink.trim()) return
+    setTranscriptLoading(true)
+    setTranscriptPreview(null)
+    try {
+      const response = await fetch(`/api/trips/${selectedTrip.id}/video-metadata/transcript`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_url: tiktokLink.trim() }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Could not retrieve this video transcript.')
+      setTranscriptPreview(data)
+    } catch (requestError) {
+      setTranscriptPreview({ detected: false, message: requestError.message })
+    } finally {
+      setTranscriptLoading(false)
+    }
+  }
+
   // Save edits to an activity's details and its optional itinerary placement.
   const saveActivity = async (event) => {
     event.preventDefault()
@@ -204,7 +253,7 @@ function App() {
           <section className="mx-auto max-w-xl rounded-3xl border border-slate-700 bg-slate-900 p-8 shadow-2xl"><p className="text-sm font-semibold text-sky-300">CREATE A TRIP</p><h2 className="mt-2 text-2xl font-bold">Start with a destination.</h2><form className="mt-7 grid gap-4" onSubmit={submitTrip}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={tripForm.name} onChange={updateForm(setTripForm)} required placeholder="Trip name" /><div className="grid gap-4 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="destination_city" value={tripForm.destination_city} onChange={updateForm(setTripForm)} placeholder="City" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="destination_region" value={tripForm.destination_region} onChange={updateForm(setTripForm)} placeholder="Region" /></div><div className="grid gap-4 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="start_date" value={tripForm.start_date} onChange={updateForm(setTripForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="end_date" value={tripForm.end_date} onChange={updateForm(setTripForm)} required /></div><button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950" disabled={submitting}>{submitting ? 'Creating…' : 'Create trip'}</button></form></section>
         ) : (
           <section className="grid gap-7 xl:grid-cols-[350px_1fr]">
-            <aside className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><p className="text-sm font-semibold text-sky-300">ADD ACTIVITY</p><h2 className="mt-2 text-xl font-bold">Add it manually</h2><p className="mt-2 text-sm text-slate-400">Place, activity name, and category are required.</p><form className="mt-6 grid gap-4" onSubmit={submitActivity}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={activityForm.name} onChange={updateForm(setActivityForm)} required placeholder="Activity name" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={activityForm.address} onChange={updateForm(setActivityForm)} required placeholder="Place or address" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={activityForm.category} onChange={updateForm(setActivityForm)} required placeholder="Category, e.g. food" /><label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={activityForm.scheduled} onChange={updateForm(setActivityForm)} /> Add to itinerary now</label>{activityForm.scheduled && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={activityForm.scheduled_date} onChange={updateForm(setActivityForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={activityForm.scheduled_time} onChange={updateForm(setActivityForm)} /></div>}<button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950 disabled:opacity-60" disabled={submitting}>{submitting ? 'Saving…' : 'Add activity'}</button></form></aside>
+            <aside className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><p className="text-sm font-semibold text-sky-300">ADD ACTIVITY</p><h2 className="mt-2 text-xl font-bold">Add it manually</h2><p className="mt-2 text-sm text-slate-400">Place, activity name, and category are required.</p><form className="mt-6 grid gap-4" onSubmit={submitActivity}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={activityForm.name} onChange={updateForm(setActivityForm)} required placeholder="Activity name" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={activityForm.address} onChange={updateForm(setActivityForm)} required placeholder="Place or address" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={activityForm.category} onChange={updateForm(setActivityForm)} required placeholder="Category, e.g. food" /><label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={activityForm.scheduled} onChange={updateForm(setActivityForm)} /> Add to itinerary now</label>{activityForm.scheduled && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={activityForm.scheduled_date} onChange={updateForm(setActivityForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={activityForm.scheduled_time} onChange={updateForm(setActivityForm)} /></div>}<button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950 disabled:opacity-60" disabled={submitting}>{submitting ? 'Saving…' : 'Add activity'}</button></form><div className="mt-8 border-t border-slate-700 pt-6"><p className="text-sm font-semibold text-sky-300">TIKTOK LINK</p><p className="mt-2 text-sm text-slate-400">ScrapeBadger retrieves full video metadata and an optional speech-to-text transcript. This does not save an activity yet.</p><form className="mt-4 grid gap-3" onSubmit={retrieveTikTokMetadata}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="url" value={tiktokLink} onChange={(event) => setTiktokLink(event.target.value)} required placeholder="https://www.tiktok.com/@creator/video/123..." /><button className="rounded-xl border border-sky-400 px-4 py-3 font-semibold text-sky-300 disabled:opacity-60" disabled={metadataLoading}>{metadataLoading ? 'Checking TikTok…' : 'Attach TikTok link'}</button></form>{metadataPreview && <div className={`mt-4 rounded-xl border p-4 text-sm ${metadataPreview.detected ? 'border-emerald-800 bg-emerald-950/30' : 'border-amber-800 bg-amber-950/30'}`}><p className="font-semibold">{metadataPreview.detected ? 'Metadata detected' : 'Nothing detected'}</p><p className="mt-1 text-slate-300">{metadataPreview.message}</p>{metadataPreview.detected && <><p className="mt-3 leading-6 text-slate-200">{metadataPreview.caption}</p><p className="mt-3 text-slate-400">{metadataPreview.author_name && `By ${metadataPreview.author_name}`}{metadataPreview.hashtags?.length > 0 && ` · #${metadataPreview.hashtags.join(' #')}`}</p><button className="mt-4 rounded-lg border border-sky-400 px-3 py-2 font-semibold text-sky-300 disabled:opacity-60" type="button" onClick={retrieveTikTokTranscript} disabled={transcriptLoading}>{transcriptLoading ? 'Retrieving transcript…' : 'Retrieve full transcript'}</button></>}{transcriptPreview && <div className={`mt-4 border-t pt-4 ${transcriptPreview.detected ? 'border-emerald-800' : 'border-amber-800'}`}><p className="font-semibold">{transcriptPreview.detected ? 'Speech-to-text transcript' : 'Transcript unavailable'}</p><p className="mt-1 text-slate-300">{transcriptPreview.message}</p>{transcriptPreview.detected && <p className="mt-3 max-h-48 overflow-y-auto whitespace-pre-wrap leading-6 text-slate-200">{transcriptPreview.text}</p>}</div>}</div>}</div></aside>
             <div className="grid gap-7"><section className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><div className="flex items-center justify-between"><div><p className="text-sm font-semibold text-sky-300">ITINERARY</p><h2 className="mt-2 text-xl font-bold">{selectedTrip.name}</h2></div><span className="text-sm text-slate-400">Drag cards to reorder a day</span></div>{Object.keys(itineraryDays).length === 0 ? <p className="mt-6 rounded-2xl border border-dashed border-slate-600 p-5 text-slate-400">Your itinerary is empty. Add your first activity to get started.</p> : <div className="mt-6 grid gap-6">{Object.entries(itineraryDays).map(([day, activities]) => <div key={day}><h3 className="mb-3 font-semibold text-sky-200">{formatDate(day)}</h3><div className="grid gap-3">{activities.map((activity) => <article draggable className="cursor-grab rounded-2xl border border-slate-700 bg-slate-800 p-4 active:cursor-grabbing" key={activity.id} onDragStart={() => setDraggedId(activity.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnActivity(day, activity.id)}><div className="flex gap-4"><span className="text-sm text-sky-300">{activity.scheduled_time || 'Any time'}</span><div className="min-w-0 flex-1"><p className="font-semibold">{activity.name}</p><p className="mt-1 text-sm text-slate-400">{activity.category} · {activity.address}</p></div><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></div></article>)}</div></div>)}</div>}</section>
               <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-sky-300">ACTIVITY POOL</p><h2 className="mt-2 text-xl font-bold">Saved for later</h2></div><select className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">All categories</option>{categories.map((category) => <option value={category} key={category}>{category}</option>)}</select></div>{activityPool.length === 0 ? <p className="mt-5 text-sm text-slate-400">No unscheduled activities.</p> : <ul className="mt-5 grid gap-3">{activityPool.map((activity) => <li className="flex items-center gap-3 rounded-xl bg-slate-800 p-4" key={activity.id}><div className="min-w-0 flex-1"><p className="font-semibold">{activity.name}</p><p className="text-sm text-slate-400">{activity.category} · {activity.address}</p></div><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></li>)}</ul>}</section></div>
           </section>

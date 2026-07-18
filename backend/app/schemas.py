@@ -63,3 +63,33 @@ class ReorderActivities(BaseModel):
     """Ordered activity identifiers for one itinerary day."""
 
     activity_ids: list[int] = Field(min_length=1)
+
+
+class TikTokMetadataRequest(BaseModel):
+    """TikTok video link submitted for metadata retrieval."""
+
+    source_url: str = Field(min_length=1, max_length=2048)
+
+
+class VideoMetadataRead(BaseModel):
+    """Non-persisted TikTok metadata preview shown before Step 5 extraction."""
+
+    source_url: str
+    detected: bool
+    caption: str | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    author_name: str | None = None
+    author_url: str | None = None
+    thumbnail_url: str | None = None
+    message: str
+
+
+class VideoTranscriptRead(BaseModel):
+    """Full non-persisted TikTok speech-to-text transcript and timestamped segments."""
+
+    source_url: str
+    video_id: str | None = None
+    detected: bool
+    text: str | None = None
+    segments: list[dict[str, object]] = Field(default_factory=list)
+    message: str

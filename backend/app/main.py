@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import models  # noqa: F401 - imports SQLAlchemy model metadata
 from .database import Base, engine
-from .routers import activities, health, trips, users
+from .routers import activities, health, trips, users, video_metadata
 
 
 @asynccontextmanager
@@ -26,4 +26,5 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(trips.router)
 app.include_router(activities.router)
+app.include_router(video_metadata.router)
 app.include_router(users.router)
