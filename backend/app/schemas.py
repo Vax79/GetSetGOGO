@@ -29,6 +29,7 @@ class ManualActivityCreate(BaseModel):
     name: str = Field(min_length=1, max_length=180)
     category: str = Field(min_length=1, max_length=80)
     address: str = Field(min_length=1, max_length=255)
+    estimated_cost: str | None = Field(default=None, max_length=80)
     scheduled_date: date | None = None
     scheduled_time: time | None = None
 
@@ -39,6 +40,7 @@ class ActivityUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=180)
     category: str = Field(min_length=1, max_length=80)
     address: str = Field(min_length=1, max_length=255)
+    estimated_cost: str | None = Field(default=None, max_length=80)
     scheduled: bool
     scheduled_date: date | None = None
     scheduled_time: time | None = None
@@ -52,11 +54,81 @@ class ActivityRead(BaseModel):
     name: str
     category: str
     address: str | None
+    latitude: str | None
+    longitude: str | None
+    operating_hours: str | None
+    estimated_cost: str | None
+    source_url: str | None
     scheduled: bool
     scheduled_date: date | None
     scheduled_time: time | None
     sort_order: int | None
+    enrichment_data: dict[str, object] | None
     created_at: datetime
+
+
+class ExtractActivitiesRequest(BaseModel):
+    """A TikTok source used to derive activity and POI candidates with Gemini."""
+
+    source_url: str = Field(min_length=1, max_length=2048)
+    include_transcript: bool = True
+
+
+class ExtractedActivityRead(BaseModel):
+    """A non-persisted activity candidate returned for explicit approval or rejection."""
+
+    activity_name: str
+    category: str
+    poi_name: str
+    poi_address: str | None
+    estimated_cost: str | None
+    source_url: str
+    geocoded: bool
+    geocoding_message: str | None = None
+    latitude: str | None = None
+    longitude: str | None = None
+    operating_hours: str | None = None
+
+
+class ExtractActivitiesRead(BaseModel):
+    """All candidates found in a single social-video extraction run."""
+
+    activities: list[ExtractedActivityRead]
+    message: str
+
+
+class SaveExtractedActivityRequest(BaseModel):
+    """An approved Gemini candidate that should be saved as an activity."""
+
+    activity_name: str = Field(min_length=1, max_length=180)
+    category: str = Field(min_length=1, max_length=80)
+    poi_name: str = Field(min_length=1, max_length=180)
+    poi_address: str | None = Field(default=None, max_length=255)
+    estimated_cost: str | None = Field(default=None, max_length=80)
+    source_url: str = Field(min_length=1, max_length=2048)
+    latitude: str | None = Field(default=None, max_length=32)
+    longitude: str | None = Field(default=None, max_length=32)
+    operating_hours: str | None = None
+
+
+class EnrichmentRead(ActivityRead):
+    """An activity after Gemini enrichment has been saved to enrichment_data."""
+
+
+class PlacementRead(BaseModel):
+    """Outcome of travel-distance placement performed immediately after approval."""
+
+    scheduled: bool
+    message: str
+    nearest_activity_name: str | None = None
+    distance_meters: int | None = None
+    travel_duration_seconds: int | None = None
+
+
+class ApprovedActivityRead(ActivityRead):
+    """An approved activity together with its automatic itinerary-placement result."""
+
+    placement: PlacementRead
 
 
 class ReorderActivities(BaseModel):

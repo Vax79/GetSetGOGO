@@ -20,6 +20,10 @@ class TikTokMetadataError(Exception):
     """Represent a ScrapeBadger request that cannot produce usable TikTok data."""
 
 
+class TikTokTranscriptUnavailable(TikTokMetadataError):
+    """Represent a valid video whose speech-to-text transcript is unavailable or empty."""
+
+
 class SafeTikTokRedirectHandler(HTTPRedirectHandler):
     """Follow share-link redirects only when every target remains a TikTok-owned host."""
 
@@ -214,5 +218,5 @@ def fetch_tiktok_transcript(source_url: str) -> TikTokTranscript:
     if not text and segments:
         text = " ".join(str(segment.get("text") or "").strip() for segment in segments).strip()
     if not text:
-        raise TikTokMetadataError("ScrapeBadger could not detect speech in this TikTok video.")
+        raise TikTokTranscriptUnavailable("ScrapeBadger could not detect speech in this TikTok video.")
     return TikTokTranscript(source_url=valid_url, video_id=video_id, text=text, segments=segments)

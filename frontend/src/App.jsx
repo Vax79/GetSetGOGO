@@ -4,7 +4,7 @@ const emptyTripForm = { name: '', destination_city: '', destination_region: '', 
 
 // Build the default manual-activity form for the selected trip.
 function activityFormFor(trip) {
-  return { name: '', category: '', address: '', scheduled: true, scheduled_date: trip?.start_date || '', scheduled_time: '' }
+  return { name: '', category: '', address: '', estimated_cost: '', scheduled: true, scheduled_date: trip?.start_date || '', scheduled_time: '' }
 }
 
 // Format an ISO date in a compact, readable form for itinerary headings.
@@ -19,6 +19,40 @@ function groupByDate(activities) {
     groups[day] = [...(groups[day] || []), activity]
     return groups
   }, {})
+}
+
+// Render Google Places weekday descriptions from the activity's stored hours JSON.
+function formatOperatingHours(value) {
+  if (!value) return 'Not provided'
+  try {
+    const hours = JSON.parse(value)
+    return hours.weekdayDescriptions?.join(' · ') || 'Not provided'
+  } catch {
+    return 'Not provided'
+  }
+}
+
+// Format routed distance in a compact itinerary-friendly unit.
+function formatDistance(meters) {
+  if (typeof meters !== 'number') return 'Distance unavailable'
+  return meters < 1000 ? `${meters} m away` : `${(meters / 1000).toFixed(1)} km away`
+}
+
+// Format Routes API seconds into a concise travel estimate.
+function formatDuration(seconds) {
+  if (typeof seconds !== 'number') return 'Travel time unavailable'
+  return seconds < 60 ? '< 1 min' : `${Math.round(seconds / 60)} min travel`
+}
+
+// Display the practical details and AI enrichment saved with an activity.
+function ActivitySupportingDetails({ activity }) {
+  const enrichment = activity.enrichment_data
+  const sections = [
+    ['Food & consumption', enrichment?.food_and_consumption],
+    ['Visiting information', enrichment?.practical_visiting_information],
+    ['Vibe & highlights', enrichment?.vibe_context_highlights],
+  ]
+  return <div className="mt-3 grid gap-2 text-sm text-slate-300"><p>{activity.category} · {activity.address || 'Location not provided'}</p>{activity.estimated_cost && <p><span className="font-medium text-slate-100">Estimated cost:</span> {activity.estimated_cost}</p>}<p><span className="font-medium text-slate-100">Hours:</span> {formatOperatingHours(activity.operating_hours)}</p>{activity.latitude && activity.longitude && <p><span className="font-medium text-slate-100">Coordinates:</span> {activity.latitude}, {activity.longitude}</p>}{activity.source_url && <a className="w-fit text-sky-300 underline" href={activity.source_url} target="_blank" rel="noreferrer">View source video</a>}{sections.map(([label, section]) => section?.summary && <div className="rounded-lg border border-slate-700 bg-slate-950/40 p-3" key={label}><p className="font-medium text-sky-200">{label}</p><p className="mt-1">{section.summary}</p></div>)}</div>
 }
 
 // Render the trip setup and manual-itinerary management experience.
@@ -40,6 +74,11 @@ function App() {
   const [metadataLoading, setMetadataLoading] = useState(false)
   const [transcriptPreview, setTranscriptPreview] = useState(null)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
+  const [extractionPreview, setExtractionPreview] = useState(null)
+  const [extractionLoading, setExtractionLoading] = useState(false)
+  const [savingCandidate, setSavingCandidate] = useState(null)
+  const [placementNotice, setPlacementNotice] = useState(null)
+  const [dragOverId, setDragOverId] = useState(null)
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId) || null
   const itineraryDays = useMemo(() => groupByDate(itinerary), [itinerary])
@@ -155,6 +194,7 @@ function App() {
       if (!response.ok) throw new Error(data.detail || 'Could not check this TikTok link.')
       setMetadataPreview(data)
       setTranscriptPreview(null)
+      setExtractionPreview(null)
     } catch (requestError) {
       setMetadataPreview({ detected: false, message: requestError.message })
     } finally {
@@ -181,6 +221,54 @@ function App() {
     } finally {
       setTranscriptLoading(false)
     }
+  }
+
+  // Use attached TikTok context to generate reviewable Gemini activity/POI candidates.
+  const extractTikTokActivities = async () => {
+    if (!selectedTrip || !tiktokLink.trim()) return
+    setExtractionLoading(true)
+    setExtractionPreview(null)
+    try {
+      const response = await fetch(`/api/trips/${selectedTrip.id}/activity-extractions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_url: tiktokLink.trim(), include_transcript: true }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Could not extract activities.')
+      setExtractionPreview(data)
+    } catch (requestError) {
+      setExtractionPreview({ activities: [], message: requestError.message })
+    } finally {
+      setExtractionLoading(false)
+    }
+  }
+
+  // Approve a reviewed candidate as an activity, then refresh the pool.
+  const approveExtractedCandidate = async (candidate) => {
+    if (!selectedTrip) return
+    setSavingCandidate(candidate.activity_name)
+    try {
+      const response = await fetch(`/api/trips/${selectedTrip.id}/activity-extractions/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(candidate),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Could not save this activity.')
+      setExtractionPreview((current) => ({ ...current, activities: current.activities.filter((item) => item.activity_name !== candidate.activity_name) }))
+      setPlacementNotice(data.placement || null)
+      await loadActivities(selectedTrip.id)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setSavingCandidate(null)
+    }
+  }
+
+  // Reject a non-persisted candidate by removing it from the current review set.
+  const rejectExtractedCandidate = (candidate) => {
+    setExtractionPreview((current) => ({ ...current, activities: current.activities.filter((item) => `${item.activity_name}-${item.poi_name}` !== `${candidate.activity_name}-${candidate.poi_name}`) }))
   }
 
   // Save edits to an activity's details and its optional itinerary placement.
@@ -228,6 +316,7 @@ function App() {
     reordered.splice(targetIndex, 0, moved)
     setItinerary((current) => current.map((activity) => (activity.scheduled_date === scheduledDate ? reordered.find((item) => item.id === activity.id) : activity)))
     setDraggedId(null)
+    setDragOverId(null)
     try {
       const response = await fetch(`/api/trips/${selectedTrip.id}/itinerary/${scheduledDate}/order`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ activity_ids: reordered.map((activity) => activity.id) }) })
       if (!response.ok) throw new Error('Could not save the new order.')
@@ -253,12 +342,63 @@ function App() {
           <section className="mx-auto max-w-xl rounded-3xl border border-slate-700 bg-slate-900 p-8 shadow-2xl"><p className="text-sm font-semibold text-sky-300">CREATE A TRIP</p><h2 className="mt-2 text-2xl font-bold">Start with a destination.</h2><form className="mt-7 grid gap-4" onSubmit={submitTrip}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={tripForm.name} onChange={updateForm(setTripForm)} required placeholder="Trip name" /><div className="grid gap-4 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="destination_city" value={tripForm.destination_city} onChange={updateForm(setTripForm)} placeholder="City" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="destination_region" value={tripForm.destination_region} onChange={updateForm(setTripForm)} placeholder="Region" /></div><div className="grid gap-4 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="start_date" value={tripForm.start_date} onChange={updateForm(setTripForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="end_date" value={tripForm.end_date} onChange={updateForm(setTripForm)} required /></div><button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950" disabled={submitting}>{submitting ? 'Creating…' : 'Create trip'}</button></form></section>
         ) : (
           <section className="grid gap-7 xl:grid-cols-[350px_1fr]">
-            <aside className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><p className="text-sm font-semibold text-sky-300">ADD ACTIVITY</p><h2 className="mt-2 text-xl font-bold">Add it manually</h2><p className="mt-2 text-sm text-slate-400">Place, activity name, and category are required.</p><form className="mt-6 grid gap-4" onSubmit={submitActivity}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={activityForm.name} onChange={updateForm(setActivityForm)} required placeholder="Activity name" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={activityForm.address} onChange={updateForm(setActivityForm)} required placeholder="Place or address" /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={activityForm.category} onChange={updateForm(setActivityForm)} required placeholder="Category, e.g. food" /><label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={activityForm.scheduled} onChange={updateForm(setActivityForm)} /> Add to itinerary now</label>{activityForm.scheduled && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={activityForm.scheduled_date} onChange={updateForm(setActivityForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={activityForm.scheduled_time} onChange={updateForm(setActivityForm)} /></div>}<button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950 disabled:opacity-60" disabled={submitting}>{submitting ? 'Saving…' : 'Add activity'}</button></form><div className="mt-8 border-t border-slate-700 pt-6"><p className="text-sm font-semibold text-sky-300">TIKTOK LINK</p><p className="mt-2 text-sm text-slate-400">ScrapeBadger retrieves full video metadata and an optional speech-to-text transcript. This does not save an activity yet.</p><form className="mt-4 grid gap-3" onSubmit={retrieveTikTokMetadata}><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="url" value={tiktokLink} onChange={(event) => setTiktokLink(event.target.value)} required placeholder="https://www.tiktok.com/@creator/video/123..." /><button className="rounded-xl border border-sky-400 px-4 py-3 font-semibold text-sky-300 disabled:opacity-60" disabled={metadataLoading}>{metadataLoading ? 'Checking TikTok…' : 'Attach TikTok link'}</button></form>{metadataPreview && <div className={`mt-4 rounded-xl border p-4 text-sm ${metadataPreview.detected ? 'border-emerald-800 bg-emerald-950/30' : 'border-amber-800 bg-amber-950/30'}`}><p className="font-semibold">{metadataPreview.detected ? 'Metadata detected' : 'Nothing detected'}</p><p className="mt-1 text-slate-300">{metadataPreview.message}</p>{metadataPreview.detected && <><p className="mt-3 leading-6 text-slate-200">{metadataPreview.caption}</p><p className="mt-3 text-slate-400">{metadataPreview.author_name && `By ${metadataPreview.author_name}`}{metadataPreview.hashtags?.length > 0 && ` · #${metadataPreview.hashtags.join(' #')}`}</p><button className="mt-4 rounded-lg border border-sky-400 px-3 py-2 font-semibold text-sky-300 disabled:opacity-60" type="button" onClick={retrieveTikTokTranscript} disabled={transcriptLoading}>{transcriptLoading ? 'Retrieving transcript…' : 'Retrieve full transcript'}</button></>}{transcriptPreview && <div className={`mt-4 border-t pt-4 ${transcriptPreview.detected ? 'border-emerald-800' : 'border-amber-800'}`}><p className="font-semibold">{transcriptPreview.detected ? 'Speech-to-text transcript' : 'Transcript unavailable'}</p><p className="mt-1 text-slate-300">{transcriptPreview.message}</p>{transcriptPreview.detected && <p className="mt-3 max-h-48 overflow-y-auto whitespace-pre-wrap leading-6 text-slate-200">{transcriptPreview.text}</p>}</div>}</div>}</div></aside>
-            <div className="grid gap-7"><section className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><div className="flex items-center justify-between"><div><p className="text-sm font-semibold text-sky-300">ITINERARY</p><h2 className="mt-2 text-xl font-bold">{selectedTrip.name}</h2></div><span className="text-sm text-slate-400">Drag cards to reorder a day</span></div>{Object.keys(itineraryDays).length === 0 ? <p className="mt-6 rounded-2xl border border-dashed border-slate-600 p-5 text-slate-400">Your itinerary is empty. Add your first activity to get started.</p> : <div className="mt-6 grid gap-6">{Object.entries(itineraryDays).map(([day, activities]) => <div key={day}><h3 className="mb-3 font-semibold text-sky-200">{formatDate(day)}</h3><div className="grid gap-3">{activities.map((activity) => <article draggable className="cursor-grab rounded-2xl border border-slate-700 bg-slate-800 p-4 active:cursor-grabbing" key={activity.id} onDragStart={() => setDraggedId(activity.id)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOnActivity(day, activity.id)}><div className="flex gap-4"><span className="text-sm text-sky-300">{activity.scheduled_time || 'Any time'}</span><div className="min-w-0 flex-1"><p className="font-semibold">{activity.name}</p><p className="mt-1 text-sm text-slate-400">{activity.category} · {activity.address}</p></div><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></div></article>)}</div></div>)}</div>}</section>
-              <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-sky-300">ACTIVITY POOL</p><h2 className="mt-2 text-xl font-bold">Saved for later</h2></div><select className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">All categories</option>{categories.map((category) => <option value={category} key={category}>{category}</option>)}</select></div>{activityPool.length === 0 ? <p className="mt-5 text-sm text-slate-400">No unscheduled activities.</p> : <ul className="mt-5 grid gap-3">{activityPool.map((activity) => <li className="flex items-center gap-3 rounded-xl bg-slate-800 p-4" key={activity.id}><div className="min-w-0 flex-1"><p className="font-semibold">{activity.name}</p><p className="text-sm text-slate-400">{activity.category} · {activity.address}</p></div><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></li>)}</ul>}</section></div>
+            <aside className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+              <p className="text-sm font-semibold text-sky-300">ADD ACTIVITY</p>
+              <h2 className="mt-2 text-xl font-bold">Add it manually</h2>
+              <p className="mt-2 text-sm text-slate-400">Place, activity name, and category are required.</p>
+              <form className="mt-6 grid gap-4" onSubmit={submitActivity}>
+                <input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={activityForm.name} onChange={updateForm(setActivityForm)} required placeholder="Activity name" />
+                <input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={activityForm.address} onChange={updateForm(setActivityForm)} required placeholder="Place or address" />
+                <input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={activityForm.category} onChange={updateForm(setActivityForm)} required placeholder="Category, e.g. food" />
+                <input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="estimated_cost" value={activityForm.estimated_cost} onChange={updateForm(setActivityForm)} placeholder="Estimated cost, optional" />
+                <label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={activityForm.scheduled} onChange={updateForm(setActivityForm)} /> Add to itinerary now</label>
+                {activityForm.scheduled && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={activityForm.scheduled_date} onChange={updateForm(setActivityForm)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={activityForm.scheduled_time} onChange={updateForm(setActivityForm)} /></div>}
+                <button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950 disabled:opacity-60" disabled={submitting}>{submitting ? 'Saving…' : 'Add activity'}</button>
+              </form>
+              <div className="mt-8 border-t border-slate-700 pt-6">
+                <p className="text-sm font-semibold text-sky-300">TIKTOK LINK</p>
+                <p className="mt-2 text-sm text-slate-400">Attach a TikTok, then review Gemini's activity and POI candidates before saving.</p>
+                <form className="mt-4 grid gap-3" onSubmit={retrieveTikTokMetadata}>
+                  <input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="url" value={tiktokLink} onChange={(event) => setTiktokLink(event.target.value)} required placeholder="https://www.tiktok.com/@creator/video/123..." />
+                  <button className="rounded-xl border border-sky-400 px-4 py-3 font-semibold text-sky-300 disabled:opacity-60" disabled={metadataLoading}>{metadataLoading ? 'Checking TikTok…' : 'Attach TikTok link'}</button>
+                </form>
+                {metadataPreview && <div className={`mt-4 rounded-xl border p-4 text-sm ${metadataPreview.detected ? 'border-emerald-800 bg-emerald-950/30' : 'border-amber-800 bg-amber-950/30'}`}>
+                  <p className="font-semibold">{metadataPreview.detected ? 'Metadata detected' : 'Nothing detected'}</p><p className="mt-1 text-slate-300">{metadataPreview.message}</p>
+                  {metadataPreview.detected && <><p className="mt-3 leading-6 text-slate-200">{metadataPreview.caption}</p><button className="mt-4 rounded-lg border border-sky-400 px-3 py-2 font-semibold text-sky-300 disabled:opacity-60" type="button" onClick={retrieveTikTokTranscript} disabled={transcriptLoading}>{transcriptLoading ? 'Retrieving transcript…' : 'Retrieve full transcript'}</button><button className="ml-2 mt-4 rounded-lg bg-sky-400 px-3 py-2 font-semibold text-slate-950 disabled:opacity-60" type="button" onClick={extractTikTokActivities} disabled={extractionLoading}>{extractionLoading ? 'Extracting…' : 'Extract activities'}</button></>}
+                  {transcriptPreview && <div className="mt-4 border-t border-emerald-800 pt-4"><p className="font-semibold">{transcriptPreview.detected ? 'Speech-to-text transcript' : 'Transcript unavailable'}</p><p className="mt-1 text-slate-300">{transcriptPreview.message}</p>{transcriptPreview.detected && <p className="mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap leading-6 text-slate-200">{transcriptPreview.text}</p>}</div>}
+                </div>}
+                {extractionPreview && <div className="mt-4 rounded-xl border border-violet-800 bg-violet-950/30 p-4 text-sm">
+                  <p className="font-semibold">Review extracted activities</p>
+                  <p className="mt-1 text-slate-300">{extractionPreview.message}</p>
+                  {extractionPreview.activities?.length === 0 && <p className="mt-3 text-slate-400">No new activities are awaiting review.</p>}
+                  {extractionPreview.activities?.map((candidate) => <article className="mt-4 rounded-xl border border-violet-800 bg-slate-900/60 p-4" key={`${candidate.activity_name}-${candidate.poi_name}`}>
+                    <p className="text-base font-semibold">{candidate.activity_name}</p>
+                    <dl className="mt-3 grid gap-2 text-slate-300">
+                      <div><dt className="inline font-medium text-slate-100">Category: </dt><dd className="inline">{candidate.category}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Estimated cost: </dt><dd className="inline">{candidate.estimated_cost || 'Not provided'}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Place: </dt><dd className="inline">{candidate.poi_name}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Address: </dt><dd className="inline">{candidate.poi_address || 'Not provided'}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Coordinates: </dt><dd className="inline">{candidate.latitude && candidate.longitude ? `${candidate.latitude}, ${candidate.longitude}` : 'Not resolved'}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Visiting hours: </dt><dd className="inline">{formatOperatingHours(candidate.operating_hours)}</dd></div>
+                      <div><dt className="inline font-medium text-slate-100">Source: </dt><dd className="inline"><a className="text-sky-300 underline" href={candidate.source_url} target="_blank" rel="noreferrer">TikTok video</a></dd></div>
+                    </dl>
+                    <p className={`mt-3 ${candidate.geocoded ? 'text-emerald-300' : 'text-amber-300'}`}>{candidate.geocoded ? 'Google Places location and visiting hours found.' : candidate.geocoding_message || 'Google Places could not resolve this location.'}</p>
+                    <div className="mt-4 flex gap-3"><button className="rounded-lg bg-emerald-400 px-3 py-2 font-semibold text-slate-950 disabled:opacity-60" type="button" onClick={() => approveExtractedCandidate(candidate)} disabled={savingCandidate === candidate.activity_name}>{savingCandidate === candidate.activity_name ? 'Approving…' : 'Approve activity'}</button><button className="rounded-lg border border-rose-400 px-3 py-2 font-semibold text-rose-200" type="button" onClick={() => rejectExtractedCandidate(candidate)}>Reject</button></div>
+                  </article>)}
+                </div>}
+              </div>
+            </aside>
+            <div className="grid gap-7">
+              {placementNotice && <section className={`rounded-2xl border p-4 text-sm ${placementNotice.scheduled ? 'border-emerald-800 bg-emerald-950/30 text-emerald-100' : 'border-amber-800 bg-amber-950/30 text-amber-100'}`}><p className="font-semibold">Placement result</p><p className="mt-1">{placementNotice.message}</p>{placementNotice.distance_meters != null && <p className="mt-2">{formatDistance(placementNotice.distance_meters)} · {formatDuration(placementNotice.travel_duration_seconds)}</p>}</section>}
+              <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-sm font-semibold tracking-wide text-sky-300">ITINERARY</p><h2 className="mt-2 text-xl font-bold">{selectedTrip.name}</h2></div><span className="rounded-full border border-slate-600 px-3 py-1 text-sm text-slate-300">Drag a card onto another to swap its position</span></div>
+                {Object.keys(itineraryDays).length === 0 ? <p className="mt-6 rounded-2xl border border-dashed border-slate-600 p-5 text-slate-400">Your itinerary is empty. Approve a geocoded activity to create the first event.</p> : <div className="mt-6 grid gap-7">{Object.entries(itineraryDays).map(([day, activities]) => <div key={day}><h3 className="mb-3 font-semibold text-sky-200">{formatDate(day)}</h3><div className="grid gap-4">{activities.map((activity, index) => <article draggable className={`cursor-grab rounded-2xl border bg-slate-800 p-5 shadow-lg transition ${dragOverId === activity.id ? 'border-sky-300 ring-2 ring-sky-400/50' : 'border-slate-700'} active:cursor-grabbing`} key={activity.id} onDragStart={() => setDraggedId(activity.id)} onDragEnd={() => { setDraggedId(null); setDragOverId(null) }} onDragOver={(event) => event.preventDefault()} onDragEnter={() => setDragOverId(activity.id)} onDrop={() => dropOnActivity(day, activity.id)}><div className="flex items-start gap-4"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sky-400/15 text-sm font-bold text-sky-200">{index + 1}</div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{activity.name}</p><span className="rounded-full bg-slate-700 px-2 py-0.5 text-xs text-slate-300">{activity.scheduled_time || 'Any time'}</span></div><ActivitySupportingDetails activity={activity} /></div><div className="flex shrink-0 gap-3"><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></div></div></article>)}</div></div>)}</div>}
+              </section>
+              <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold tracking-wide text-sky-300">ACTIVITY POOL</p><h2 className="mt-2 text-xl font-bold">Saved for later</h2></div><select className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">All categories</option>{categories.map((category) => <option value={category} key={category}>{category}</option>)}</select></div>{activityPool.length === 0 ? <p className="mt-5 text-sm text-slate-400">No unscheduled activities.</p> : <ul className="mt-5 grid gap-4">{activityPool.map((activity) => <li className="rounded-2xl border border-slate-700 bg-slate-800 p-5" key={activity.id}><div className="flex items-start gap-4"><div className="min-w-0 flex-1"><p className="font-semibold">{activity.name}</p><ActivitySupportingDetails activity={activity} /></div><div className="flex shrink-0 gap-3"><button className="text-sm text-sky-300" type="button" onClick={() => setEditingActivity(activity)}>Edit</button><button className="text-sm text-rose-300" type="button" onClick={() => deleteActivity(activity)}>Delete</button></div></div></li>)}</ul>}</section>
+            </div>
           </section>
         )}
-        {editingActivity && <div className="fixed inset-0 grid place-items-center bg-slate-950/80 p-6"><form className="w-full max-w-lg rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl" onSubmit={saveActivity}><div className="flex items-center justify-between"><h2 className="text-xl font-bold">Edit activity</h2><button className="text-slate-400" type="button" onClick={() => setEditingActivity(null)}>Close</button></div><div className="mt-5 grid gap-4"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={editingActivity.name} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={editingActivity.address || ''} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={editingActivity.category} onChange={updateForm(setEditingActivity)} required /><label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={editingActivity.scheduled} onChange={updateForm(setEditingActivity)} /> Keep on itinerary</label>{editingActivity.scheduled && <div className="grid gap-3 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={editingActivity.scheduled_date || selectedTrip.start_date} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={editingActivity.scheduled_time || ''} onChange={updateForm(setEditingActivity)} /></div>}<button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950" disabled={submitting}>{submitting ? 'Saving…' : 'Save changes'}</button></div></form></div>}
+        {editingActivity && <div className="fixed inset-0 grid place-items-center bg-slate-950/80 p-6"><form className="w-full max-w-lg rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-2xl" onSubmit={saveActivity}><div className="flex items-center justify-between"><h2 className="text-xl font-bold">Edit activity</h2><button className="text-slate-400" type="button" onClick={() => setEditingActivity(null)}>Close</button></div><div className="mt-5 grid gap-4"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="name" value={editingActivity.name} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="address" value={editingActivity.address || ''} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="category" value={editingActivity.category} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" name="estimated_cost" value={editingActivity.estimated_cost || ''} onChange={updateForm(setEditingActivity)} placeholder="Estimated cost" /><label className="flex gap-2 text-sm"><input type="checkbox" name="scheduled" checked={editingActivity.scheduled} onChange={updateForm(setEditingActivity)} /> Keep on itinerary</label>{editingActivity.scheduled && <div className="grid gap-3 sm:grid-cols-2"><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="date" name="scheduled_date" value={editingActivity.scheduled_date || selectedTrip.start_date} onChange={updateForm(setEditingActivity)} required /><input className="rounded-xl border border-slate-600 bg-slate-800 px-4 py-3" type="time" name="scheduled_time" value={editingActivity.scheduled_time || ''} onChange={updateForm(setEditingActivity)} /></div>}<button className="rounded-xl bg-sky-400 px-5 py-3 font-semibold text-slate-950" disabled={submitting}>{submitting ? 'Saving…' : 'Save changes'}</button></div></form></div>}
       </div>
     </main>
   )

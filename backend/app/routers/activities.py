@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import date
+import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -43,6 +44,16 @@ def require_activity(activity_id: int, database: Session) -> Activity:
     return activity
 
 
+def require_unique_activity_name(trip_id: int, name: str, database: Session, ignored_activity_id: int | None = None) -> None:
+    """Reject a normalized activity-name duplicate within one trip before it can be persisted."""
+    query = database.query(Activity).filter_by(trip_id=trip_id, normalized_name=normalize_name(name))
+    if ignored_activity_id is not None:
+        query = query.filter(Activity.id != ignored_activity_id)
+    duplicate = query.first()
+    if duplicate:
+        raise HTTPException(status_code=409, detail=f"An activity named '{duplicate.name}' already exists for this trip.")
+
+
 def validate_scheduled_date(scheduled_date: date, trip: Trip) -> None:
     """Ensure manually scheduled activities fall within their trip's date range."""
     if not trip.start_date <= scheduled_date <= trip.end_date:
@@ -60,10 +71,16 @@ def serialize_activity(activity: Activity, scheduled: ScheduledActivity | None) 
         "name": activity.name,
         "category": activity.category,
         "address": activity.address,
+        "latitude": activity.latitude,
+        "longitude": activity.longitude,
+        "operating_hours": activity.operating_hours,
+        "estimated_cost": activity.estimated_cost,
+        "source_url": activity.source_url,
         "scheduled": scheduled is not None,
         "scheduled_date": scheduled.scheduled_date if scheduled else None,
         "scheduled_time": scheduled.scheduled_time if scheduled else None,
         "sort_order": scheduled.sort_order if scheduled else None,
+        "enrichment_data": json.loads(activity.enrichment_data) if activity.enrichment_data else None,
         "created_at": activity.created_at,
     }
 
@@ -122,6 +139,7 @@ def create_manual_activity(
 ) -> dict[str, object]:
     """Create a manual activity and optionally place it on a selected itinerary date."""
     trip = require_trip(trip_id, database)
+    require_unique_activity_name(trip_id, payload.name, database)
     if payload.scheduled_date:
         validate_scheduled_date(payload.scheduled_date, trip)
 
@@ -131,6 +149,7 @@ def create_manual_activity(
         normalized_name=normalize_name(payload.name),
         category=payload.category.strip(),
         address=payload.address.strip(),
+        estimated_cost=payload.estimated_cost.strip() if payload.estimated_cost else None,
         scheduled=payload.scheduled_date is not None,
     )
     database.add(activity)
@@ -162,10 +181,12 @@ def update_activity(
     """Edit a manual activity and create, update, or remove its itinerary placement."""
     activity = require_activity(activity_id, database)
     trip = require_trip(activity.trip_id, database)
+    require_unique_activity_name(activity.trip_id, payload.name, database, activity_id)
     activity.name = payload.name.strip()
     activity.normalized_name = normalize_name(payload.name)
     activity.category = payload.category.strip()
     activity.address = payload.address.strip()
+    activity.estimated_cost = payload.estimated_cost.strip() if payload.estimated_cost else None
     placement = scheduled_record(activity_id, database)
 
     if payload.scheduled:

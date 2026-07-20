@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from app.services.tiktok import (
     TikTokMetadataError,
+    TikTokTranscriptUnavailable,
     extract_video_id,
     fetch_tiktok_metadata,
     fetch_tiktok_transcript,
@@ -55,6 +56,14 @@ class TikTokMetadataTests(unittest.TestCase):
 
         self.assertEqual(transcript.text, "Try this cafe. It is excellent.")
         self.assertEqual(len(transcript.segments), 2)
+
+    def test_identifies_a_video_without_speech_as_optional_transcript_unavailable(self) -> None:
+        """Distinguish a valid silent video from a failed TikTok provider request."""
+        with patch.dict(os.environ, {"SCRAPEBADGER_API_KEY": "test-key"}), patch(
+            "app.services.tiktok.urlopen", return_value=self.mock_response({"voice_to_text": None, "subtitles": []})
+        ):
+            with self.assertRaises(TikTokTranscriptUnavailable):
+                fetch_tiktok_transcript("https://www.tiktok.com/@jetsetter/video/123")
 
     def test_requires_a_full_tiktok_video_url(self) -> None:
         """Reject unsupported hosts and short links that do not contain a video identifier."""
