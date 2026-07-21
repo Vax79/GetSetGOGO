@@ -16,7 +16,7 @@ class GeminiServiceTests(unittest.TestCase):
             "activities": [
                 {
                     "activity_name": "Eat ramen",
-                    "category": "food",
+                    "categories": ["Food", "Culture"],
                     "poi_name": "Ramen Street",
                     "poi_address": "Shinjuku, Tokyo",
                 }
@@ -27,6 +27,7 @@ class GeminiServiceTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].activity_name, "Eat ramen")
+        self.assertEqual(candidates[0].categories, ["Food", "Culture"])
         self.assertEqual(candidates[0].poi_name, "Ramen Street")
 
     def test_reads_rest_interaction_model_output(self) -> None:
@@ -38,7 +39,15 @@ class GeminiServiceTests(unittest.TestCase):
     @patch("app.services.gemini.call_gemini_json")
     def test_rejects_incomplete_extracted_activity(self, mock_call) -> None:
         """Reject a model response that omits a required candidate field."""
-        mock_call.return_value = {"activities": [{"activity_name": "Eat ramen", "category": "food"}]}
+        mock_call.return_value = {"activities": [{"activity_name": "Eat ramen", "categories": ["Food"]}]}
+
+        with self.assertRaises(GeminiError):
+            extract_activities("Tokyo", "Best ramen", None)
+
+    @patch("app.services.gemini.call_gemini_json")
+    def test_rejects_categories_outside_the_fixed_taxonomy(self, mock_call) -> None:
+        """Prevent a model label outside the app's fixed filtering taxonomy from being saved."""
+        mock_call.return_value = {"activities": [{"activity_name": "Eat ramen", "categories": ["Local cuisine"], "poi_name": "Ramen Street", "poi_address": "", "estimated_cost": ""}]}
 
         with self.assertRaises(GeminiError):
             extract_activities("Tokyo", "Best ramen", None)

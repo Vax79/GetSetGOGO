@@ -1,0 +1,8 @@
+import { formatOperatingHours } from '../utils/formatters'
+
+export default function ActivityDetails({ activity }) {
+  const enrichment = activity.enrichment_data
+  const categories = activity.categories?.length ? activity.categories : activity.category ? [activity.category] : []
+  const sections = [['Food & consumption', enrichment?.food_and_consumption], ['Visiting information', enrichment?.practical_visiting_information], ['Vibe & highlights', enrichment?.vibe_context_highlights]]
+  return <div className="mt-4 min-w-0 break-words border-t border-[#ebe8e1] pt-4 text-sm leading-6 text-[#68716d]"><p className="break-words">{activity.address || 'Location not provided'}</p>{categories.length > 0 && <p className="mt-2 break-words"><b className="font-semibold text-[#45524e]">Categories:</b> {categories.join(' · ')}</p>}<p className="mt-2 break-words"><b className="font-semibold text-[#45524e]">Hours:</b> {formatOperatingHours(activity.operating_hours)}</p>{activity.latitude && activity.longitude && <p className="mt-2 break-all text-xs text-[#8b9490]">{activity.latitude}, {activity.longitude}</p>}{activity.source_url && <a className="mt-3 inline-flex max-w-full break-all font-semibold text-[#b45645] underline underline-offset-4" href={activity.source_url} target="_blank" rel="noreferrer">Watch source on TikTok ↗</a>}{sections.map(([title, section]) => section?.summary && <div className="mt-3 min-w-0 rounded-xl bg-[#f6f3ed] p-3" key={title}><p className="break-words text-xs font-bold tracking-wide text-[#49635d]">{title.toUpperCase()}</p><p className="mt-1 break-words">{section.summary}</p></div>)}</div>
+}

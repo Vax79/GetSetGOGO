@@ -5,7 +5,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -14,8 +13,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 PLACES_API_BASE_URL = "https://places.googleapis.com/v1"
-TEXT_SEARCH_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location"
-PLACE_DETAILS_FIELD_MASK = "displayName,formattedAddress,location,regularOpeningHours"
+TEXT_SEARCH_FIELD_MASK = "places.displayName,places.formattedAddress,places.location,places.regularOpeningHours"
 
 
 class GeocodingError(Exception):
@@ -34,10 +32,10 @@ class GeocodedPlace:
 
 
 def get_places_api_key() -> str:
-    """Read the server-only Places credential without exposing it through application responses."""
-    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
+    """Read the shared Google Maps key without exposing it through application responses."""
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip() or os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
     if not api_key:
-        raise GeocodingError("Google Places is not configured. Add GOOGLE_PLACES_API_KEY to .env.")
+        raise GeocodingError("Google Places is not configured. Add GOOGLE_MAPS_API_KEY to .env.")
     return api_key
 
 
@@ -85,32 +83,35 @@ def regular_hours(place: dict[str, object]) -> str | None:
 
 
 def geocode_place(location_name: str, destination: str) -> GeocodedPlace:
-    """Resolve a location through Text Search, then fetch its coordinates and operating hours."""
+    """Resolve a location and its practical details with one Google Text Search call."""
+    matches = search_places(location_name, destination, 1)
+    if not matches:
+        raise GeocodingError("Google Places could not find this location in the trip destination.")
+    return matches[0]
+
+
+def search_places(location_name: str, destination: str, page_size: int = 5) -> list[GeocodedPlace]:
+    """Return a short list of Google Places matches for a manual activity address search."""
     query = ", ".join(part.strip() for part in (location_name, destination) if part and part.strip())
     if not query:
-        raise GeocodingError("A location name is required for geocoding.")
+        raise GeocodingError("Enter a place or address before searching Google Maps.")
     search = request_places_json(
         f"{PLACES_API_BASE_URL}/places:searchText",
         "POST",
         TEXT_SEARCH_FIELD_MASK,
-        {"textQuery": query, "pageSize": 1},
+        {"textQuery": query, "pageSize": max(1, min(page_size, 5))},
     )
     matches = search.get("places")
-    if not isinstance(matches, list) or not matches or not isinstance(matches[0], dict):
+    if not isinstance(matches, list):
         raise GeocodingError("Google Places could not find this location in the trip destination.")
-    match = matches[0]
-    place_id = match.get("id")
-    if not isinstance(place_id, str) or not place_id.strip():
-        raise GeocodingError("Google Places returned a location without a place ID.")
-    details = request_places_json(
-        f"{PLACES_API_BASE_URL}/places/{quote(place_id, safe='')}",
-        "GET",
-        PLACE_DETAILS_FIELD_MASK,
-    )
-    return GeocodedPlace(
-        name=display_name(details, display_name(match, location_name)),
-        address=str(details.get("formattedAddress") or match.get("formattedAddress") or "").strip() or None,
-        latitude=coordinate(details, "latitude") or coordinate(match, "latitude"),
-        longitude=coordinate(details, "longitude") or coordinate(match, "longitude"),
-        operating_hours=regular_hours(details),
-    )
+    return [
+        GeocodedPlace(
+            name=display_name(match, location_name),
+            address=str(match.get("formattedAddress") or "").strip() or None,
+            latitude=coordinate(match, "latitude"),
+            longitude=coordinate(match, "longitude"),
+            operating_hours=regular_hours(match),
+        )
+        for match in matches
+        if isinstance(match, dict)
+    ]

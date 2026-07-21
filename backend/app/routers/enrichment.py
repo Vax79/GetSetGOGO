@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
-from ..models import Activity, ScheduledActivity, Trip
+from ..auth import active_user
+from ..models import Activity, ScheduledActivity, Trip, User
 from ..schemas import (
     ActivityRead,
     ApprovedActivityRead,
@@ -21,9 +22,10 @@ from ..schemas import (
 )
 from ..services.gemini import GeminiError, enrich_activity_data, extract_activities
 from ..services.places import GeocodingError, geocode_place
-from ..services.routes import RoutesError, route_matrix
-from ..services.tiktok import TikTokMetadataError, TikTokTranscriptUnavailable, fetch_tiktok_metadata, fetch_tiktok_transcript
-from .activities import normalize_name, require_activity, require_trip, require_unique_activity_name, scheduled_record, serialize_activity
+from ..services.routes import RoutesError, compute_route, route_matrix
+from ..services.tiktok import TikTokMetadataError, TikTokTranscriptUnavailable, fetch_tiktok_metadata, fetch_tiktok_transcript, validate_tiktok_url
+from .activities import category_values, normalize_name, require_activity, require_trip, require_unique_activity_name, scheduled_record, serialize_activity
+from ..services.collaboration import clean_display_name, ensure_trip_member, ensure_user_membership
 
 router = APIRouter(tags=["enrichment"])
 
@@ -63,6 +65,35 @@ def placement_time(existing_time: time | None) -> time | None:
     return (datetime.combine(datetime.today(), existing_time) + timedelta(minutes=90)).time()
 
 
+def save_route_segment(
+    placement: ScheduledActivity,
+    from_activity: Activity,
+    to_activity: Activity,
+) -> None:
+    """Persist a placement-time Google Routes polyline for a consecutive itinerary pair."""
+    if not all((from_activity.latitude, from_activity.longitude, to_activity.latitude, to_activity.longitude)):
+        placement.route_from_activity_id = None
+        placement.route_polyline = None
+        placement.route_distance_meters = None
+        placement.route_duration_seconds = None
+        return
+    try:
+        route = compute_route(
+            (from_activity.latitude, from_activity.longitude),
+            (to_activity.latitude, to_activity.longitude),
+        )
+    except RoutesError:
+        placement.route_from_activity_id = None
+        placement.route_polyline = None
+        placement.route_distance_meters = None
+        placement.route_duration_seconds = None
+        return
+    placement.route_from_activity_id = from_activity.id
+    placement.route_polyline = route.encoded_polyline
+    placement.route_distance_meters = route.distance_meters
+    placement.route_duration_seconds = route.duration_seconds
+
+
 def place_approved_activity(activity: Activity, trip: Trip, database: Session) -> PlacementRead:
     """Place an approved activity as the first event or after its nearest routed neighbor."""
     records = (
@@ -95,13 +126,14 @@ def place_approved_activity(activity: Activity, trip: Trip, database: Session) -
         return PlacementRead(scheduled=False, message="Approved and saved to the activity pool because no drivable route was found.")
     _, nearest_index, metric = min(ranked)
     nearest_activity, nearest_schedule = geo_records[nearest_index]
-    later_records = database.query(ScheduledActivity).join(Activity, Activity.id == ScheduledActivity.activity_id).filter(
+    later_records = database.query(Activity, ScheduledActivity).join(ScheduledActivity, ScheduledActivity.activity_id == Activity.id).filter(
         Activity.trip_id == trip.id,
         ScheduledActivity.scheduled_date == nearest_schedule.scheduled_date,
         ScheduledActivity.sort_order > nearest_schedule.sort_order,
-    )
-    for later in later_records:
-        later.sort_order += 1
+    ).order_by(ScheduledActivity.sort_order).all()
+    next_activity, next_schedule = later_records[0] if later_records else (None, None)
+    for _, later_schedule in later_records:
+        later_schedule.sort_order += 1
     placement = ScheduledActivity(
         activity_id=activity.id,
         scheduled_date=nearest_schedule.scheduled_date,
@@ -109,6 +141,9 @@ def place_approved_activity(activity: Activity, trip: Trip, database: Session) -
         sort_order=nearest_schedule.sort_order + 1,
     )
     database.add(placement)
+    save_route_segment(placement, nearest_activity, activity)
+    if next_activity and next_schedule:
+        save_route_segment(next_schedule, activity, next_activity)
     activity.scheduled = True
     return PlacementRead(
         scheduled=True,
@@ -125,22 +160,31 @@ def extract_tiktok_activities(
     payload: ExtractActivitiesRequest,
     database: Session = Depends(get_db),
 ) -> ExtractActivitiesRead:
-    """Use TikTok context and Gemini to return non-persisted activity/POI candidates."""
+    """Use previewed TikTok context and Gemini to return non-persisted activity/POI candidates."""
     trip = require_trip(trip_id, database)
     try:
-        metadata = fetch_tiktok_metadata(payload.source_url)
+        source_url = validate_tiktok_url(payload.source_url)
     except TikTokMetadataError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    transcript = None
-    if payload.include_transcript:
+    caption = payload.caption.strip() if payload.caption else None
+    canonical_source_url = source_url
+    if not caption:
         try:
-            transcript = fetch_tiktok_transcript(payload.source_url).text
+            metadata = fetch_tiktok_metadata(source_url)
+        except TikTokMetadataError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        caption = metadata.caption
+        canonical_source_url = metadata.source_url
+    transcript = payload.transcript.strip() if payload.transcript else None
+    if not transcript and payload.include_transcript:
+        try:
+            transcript = fetch_tiktok_transcript(source_url).text
         except TikTokTranscriptUnavailable:
             transcript = None
         except TikTokMetadataError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
     try:
-        candidates = extract_activities(trip_destination(trip), metadata.caption, transcript)
+        candidates = extract_activities(trip_destination(trip), caption, transcript)
     except GeminiError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -153,11 +197,11 @@ def extract_tiktok_activities(
             response_activities.append(
                 ExtractedActivityRead(
                     activity_name=candidate.activity_name,
-                    category=candidate.category,
+                    categories=candidate.categories,
                     poi_name=place.name,
                     poi_address=place.address,
                     estimated_cost=candidate.estimated_cost,
-                    source_url=metadata.source_url,
+                    source_url=canonical_source_url,
                     geocoded=True,
                     latitude=place.latitude,
                     longitude=place.longitude,
@@ -168,11 +212,11 @@ def extract_tiktok_activities(
             response_activities.append(
                 ExtractedActivityRead(
                     activity_name=candidate.activity_name,
-                    category=candidate.category,
+                    categories=candidate.categories,
                     poi_name=candidate.poi_name,
                     poi_address=candidate.poi_address,
                     estimated_cost=candidate.estimated_cost,
-                    source_url=metadata.source_url,
+                    source_url=canonical_source_url,
                     geocoded=False,
                     geocoding_message=str(error),
                 )
@@ -198,17 +242,26 @@ def approve_extracted_activity(
     normalized = normalize_name(payload.activity_name)
     require_unique_activity_name(trip_id, payload.activity_name, database)
 
+    submitted_by = clean_display_name(payload.submitted_by_name)
+    contributor = active_user()
+    if contributor:
+        ensure_user_membership(trip, contributor, database)
+    elif submitted_by:
+        contributor = ensure_trip_member(trip, submitted_by, database)
+    categories = category_values(",".join(payload.categories))
     activity = Activity(
         trip_id=trip_id,
         name=payload.activity_name.strip(),
         normalized_name=normalized,
-        category=payload.category.strip(),
+        category=categories[0],
+        categories=json.dumps(categories),
         address=(payload.poi_address or payload.poi_name).strip(),
         estimated_cost=payload.estimated_cost.strip() if payload.estimated_cost else None,
         source_url=payload.source_url.strip(),
         latitude=payload.latitude,
         longitude=payload.longitude,
         operating_hours=payload.operating_hours,
+        submitted_by_id=contributor.id if contributor else None,
         scheduled=False,
     )
     database.add(activity)
@@ -221,7 +274,7 @@ def approve_extracted_activity(
         pass
     database.commit()
     database.refresh(activity)
-    return ApprovedActivityRead(**serialize_activity(activity, scheduled_record(activity.id, database)), placement=placement)
+    return ApprovedActivityRead(**serialize_activity(activity, scheduled_record(activity.id, database), contributor.name if contributor else None), placement=placement)
 
 
 @router.post("/api/activities/{activity_id}/enrich", response_model=EnrichmentRead)
@@ -237,4 +290,5 @@ def enrich_activity(activity_id: int, database: Session = Depends(get_db)) -> En
     activity.enrichment_data = json.dumps(sections)
     database.commit()
     database.refresh(activity)
-    return EnrichmentRead(**serialize_activity(activity, scheduled_record(activity.id, database)))
+    contributor = database.get(User, activity.submitted_by_id) if activity.submitted_by_id else None
+    return EnrichmentRead(**serialize_activity(activity, scheduled_record(activity.id, database), contributor.name if contributor else None))

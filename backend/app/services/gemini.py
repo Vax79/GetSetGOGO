@@ -9,6 +9,8 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
+from ..categories import ACTIVITY_CATEGORIES, canonical_category
+
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
@@ -24,7 +26,7 @@ class ExtractedActivity:
     """A normalized activity and its distinct POI derived from social-video context."""
 
     activity_name: str
-    category: str
+    categories: list[str]
     poi_name: str
     poi_address: str | None
     estimated_cost: str | None
@@ -64,7 +66,7 @@ def call_gemini_json(prompt: str, schema: dict[str, object]) -> dict[str, object
     """Request JSON-schema-constrained output from Gemini's Interactions REST API."""
     body = json.dumps(
         {
-            "model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+            "model": os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
             "input": prompt,
             "generation_config": {"temperature": 0.2, "thinking_level": "low"},
             "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
@@ -79,7 +81,11 @@ def call_gemini_json(prompt: str, schema: dict[str, object]) -> dict[str, object
     try:
         with urlopen(request, timeout=45) as response:  # noqa: S310 - provider URL is a module constant.
             payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+    except HTTPError as error:
+        if error.code == 429:
+            raise GeminiError("Gemini's request quota is temporarily exhausted. Please wait a minute and try again.") from error
+        raise GeminiError("Gemini could not complete this request. Please try again.") from error
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
         raise GeminiError("Gemini could not complete this request. Please try again.") from error
     try:
         result = json.loads(interaction_output(payload))
@@ -98,6 +104,26 @@ def nonempty_string(value: object) -> str:
     return text
 
 
+def categories_from_model(value: object) -> list[str]:
+    """Validate, deduplicate, and bound the practical categories returned by Gemini."""
+    if not isinstance(value, list):
+        raise GeminiError("Gemini returned an incomplete activity. Please try again.")
+    categories: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        category = canonical_category(item)
+        if not category:
+            raise GeminiError("Gemini returned an unsupported activity category. Please try again.")
+        key = category.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        categories.append(category[:80])
+    if not categories:
+        raise GeminiError("Gemini returned an incomplete activity. Please try again.")
+    return categories[:5]
+
+
 def extract_activities(
     destination: str,
     caption: str,
@@ -113,19 +139,19 @@ def extract_activities(
                     "type": "object",
                     "properties": {
                         "activity_name": {"type": "string"},
-                        "category": {"type": "string"},
+                        "categories": {"type": "array", "items": {"type": "string", "enum": list(ACTIVITY_CATEGORIES)}, "minItems": 1, "maxItems": 5},
                         "poi_name": {"type": "string"},
                         "poi_address": {"type": "string", "description": "Address when stated, otherwise an empty string."},
                         "estimated_cost": {"type": "string", "description": "Cost when stated, otherwise an empty string."},
                     },
-                    "required": ["activity_name", "category", "poi_name", "poi_address", "estimated_cost"],
+                    "required": ["activity_name", "categories", "poi_name", "poi_address", "estimated_cost"],
                 },
             }
         },
         "required": ["activities"],
     }
     prompt = f"""Extract travel activities mentioned in this TikTok context for a trip to {destination or 'the destination'}.
-Create one item for each distinct activity and its place of interest (POI). Do not invent names, addresses, costs, or facts. Use a concise practical category such as food, sightseeing, shopping, nightlife, wellness, or activity. Return an empty list if no identifiable activity and POI are mentioned.
+Create one item for each distinct activity and its place of interest (POI). Do not invent names, addresses, costs, or facts. Return one to five categories, using only these exact labels: {', '.join(ACTIVITY_CATEGORIES)}. Return an empty list if no identifiable activity and POI are mentioned.
 
 Caption:
 {caption}
@@ -144,7 +170,7 @@ Transcript:
         candidates.append(
             ExtractedActivity(
                 activity_name=nonempty_string(record.get("activity_name")),
-                category=nonempty_string(record.get("category")),
+                categories=categories_from_model(record.get("categories")),
                 poi_name=nonempty_string(record.get("poi_name")),
                 poi_address=str(address_value).strip() if address_value else None,
                 estimated_cost=str(record.get("estimated_cost") or "").strip() or None,

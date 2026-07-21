@@ -1,0 +1,28 @@
+import { useState } from 'react'
+import { ACTIVITY_CATEGORIES } from '../constants/categories'
+import { activityFormFor } from '../utils/formatters'
+
+export default function ActivityModal({ trip, activity, defaultScheduledDate, onClose, onSave, onSearchPlaces, submitting }) {
+  const [form, setForm] = useState(() => activityFormFor(trip, activity, defaultScheduledDate))
+  const [searching, setSearching] = useState(false)
+  const [results, setResults] = useState([])
+  const [searchError, setSearchError] = useState('')
+  const selectedCategories = form.category.split(',').map((category) => category.trim()).filter(Boolean)
+  const update = (event) => { const { name, value, type, checked } = event.target; setForm((current) => ({ ...current, [name]: type === 'checkbox' ? checked : value })) }
+  const submit = async (event) => { event.preventDefault(); const saved = await onSave(activity ? { ...form, id: activity.id } : form); if (saved) onClose() }
+  const search = async () => {
+    if (!form.address.trim()) return
+    setSearching(true); setSearchError(''); setResults([])
+    try { setResults(await onSearchPlaces(form.address)) } catch (error) { setSearchError(error.message) } finally { setSearching(false) }
+  }
+  const choosePlace = (place) => {
+    setForm((current) => ({ ...current, address: place.address || place.name, latitude: place.latitude, longitude: place.longitude, operating_hours: place.operating_hours }))
+    setResults([])
+  }
+  const toggleCategory = (category) => setForm((current) => {
+    const selected = current.category.split(',').map((item) => item.trim()).filter(Boolean)
+    const next = selected.includes(category) ? selected.filter((item) => item !== category) : [...selected, category]
+    return { ...current, category: next.join(', ') }
+  })
+  return <div className="fixed inset-0 z-30 grid place-items-center bg-[#263230]/35 p-4 backdrop-blur-sm"><form className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-[1.8rem] bg-[#fdfbf7] p-6 shadow-2xl sm:p-8" onSubmit={submit}><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-bold tracking-[.18em] text-[#e0604e]">{activity ? 'EDIT PLACE' : 'ADD A PLACE'}</p><h2 className="mt-2 font-serif text-3xl">{activity ? 'Refine the details.' : 'Where should we go?'}</h2></div><button type="button" onClick={onClose} className="grid h-9 w-9 place-items-center rounded-full bg-[#f0eee9] text-lg text-[#68716d]">×</button></div><div className="mt-7 grid gap-4"><label>Activity name<input name="name" value={form.name} onChange={update} required placeholder="e.g. Morning at Gyeongbokgung" /></label><div><label>Place or address<div className="mt-1 flex gap-2"><input name="address" value={form.address} onChange={(event) => { update(event); setResults([]) }} required placeholder="Place name or street address" /><button type="button" onClick={search} disabled={searching || !form.address.trim()} className="shrink-0 rounded-xl border border-[#c8d4cf] bg-white px-3 text-sm font-bold text-[#35574e] hover:bg-[#edf5f0] disabled:opacity-60">{searching ? 'Searching…' : 'Search Maps'}</button></div></label><p className="mt-1.5 text-xs text-[#7d8782]">Choose a Google Maps result to save its address and map location.</p>{searchError && <p className="mt-2 rounded-lg bg-[#fff0ed] px-3 py-2 text-sm text-[#9a4c3e]">{searchError}</p>}{results.length > 0 && <div className="mt-2 overflow-hidden rounded-xl border border-[#dedbd3] bg-white">{results.map((place, index) => <button type="button" key={`${place.name}-${place.address}-${index}`} onClick={() => choosePlace(place)} className="block w-full border-b border-[#eeeae3] px-4 py-3 text-left last:border-b-0 hover:bg-[#edf5f0]"><span className="block text-sm font-semibold text-[#263230]">{place.name}</span><span className="mt-0.5 block text-xs text-[#68716d]">{place.address || 'Address unavailable'}</span></button>)}</div>}</div><div><p className="text-sm font-semibold text-[#52635e]">Categories</p><div className="mt-2 flex flex-wrap gap-2">{ACTIVITY_CATEGORIES.map((category) => <button type="button" key={category} onClick={() => toggleCategory(category)} className={`rounded-full border px-3 py-1.5 text-sm font-semibold transition ${selectedCategories.includes(category) ? 'border-[#263230] bg-[#263230] text-white' : 'border-[#dedbd3] bg-white text-[#68716d] hover:border-[#9da9a3]'}`}>{category}</button>)}</div>{selectedCategories.length === 0 && <p className="mt-2 text-xs text-[#a54f40]">Choose at least one category.</p>}</div><label>Estimated cost<input name="estimated_cost" value={form.estimated_cost} onChange={update} placeholder="$20" /></label><label className="flex cursor-pointer items-center gap-3 rounded-xl bg-[#f3f0e9] px-4 py-3 text-sm font-semibold text-[#52635e]"><input type="checkbox" name="scheduled" checked={form.scheduled} onChange={update} className="h-4 w-4 accent-[#e0604e]" />Add it to the itinerary now</label>{form.scheduled && <div className="grid gap-4 sm:grid-cols-2"><label>Date<input type="date" name="scheduled_date" min={trip.start_date} max={trip.end_date} value={form.scheduled_date} onChange={update} required /></label><label>Time <span className="font-normal text-[#969d99]">optional</span><input type="time" name="scheduled_time" value={form.scheduled_time} onChange={update} /></label></div>}</div><button className="mt-7 w-full rounded-xl bg-[#263230] px-5 py-3.5 font-bold text-white hover:bg-[#374744] disabled:opacity-60" disabled={submitting || selectedCategories.length === 0}>{submitting ? 'Saving…' : activity ? 'Save changes' : 'Add place'}</button></form></div>
+}
